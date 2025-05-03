@@ -5,14 +5,14 @@ import 'package:http/http.dart' as http;
 import 'package:latlong2/latlong.dart';
 
 class FixedKathmanduAQIMap extends StatefulWidget {
-  const FixedKathmanduAQIMap({Key? key}) : super(key: key);
+  const FixedKathmanduAQIMap({super.key});
 
   @override
   State<FixedKathmanduAQIMap> createState() => _FixedKathmanduAQIMapState();
 }
 
 class _FixedKathmanduAQIMapState extends State<FixedKathmanduAQIMap> {
-  final String _apiKey = '8e20d345d6933be0fb73f1fa32b81295'; // Replace this
+  final String _apiKey = '8e20d345d6933be0fb73f1fa32b81295'; // Replace with your API key
   List<Marker> _cityMarkers = [];
   bool _isLoading = true;
 
@@ -45,6 +45,8 @@ class _FixedKathmanduAQIMapState extends State<FixedKathmanduAQIMap> {
         markers.add(_buildCityMarker(city['name'], city['lat'], city['lon'], aqi));
       } catch (e) {
         debugPrint("Error for ${city['name']}: $e");
+        // Add marker with unknown AQI if there's an error
+        markers.add(_buildCityMarker(city['name'], city['lat'], city['lon'], -1));
       }
     }
 
@@ -55,20 +57,36 @@ class _FixedKathmanduAQIMapState extends State<FixedKathmanduAQIMap> {
   }
 
   Future<int> _fetchAqiForLocation(double lat, double lon) async {
-    final url =
-        "https://api.openweathermap.org/data/2.5/air_pollution?lat=$lat&lon=$lon&appid=$_apiKey";
-    final response = await http.get(Uri.parse(url));
+    final url = Uri.parse(
+      "https://api.openweathermap.org/data/2.5/air_pollution?lat=$lat&lon=$lon&appid=$_apiKey",
+    );
+    final response = await http.get(url);
 
     if (response.statusCode == 200) {
       final json = jsonDecode(response.body);
-      return json['list'][0]['main']['aqi'] ?? 0;
+      final pm2_5 = json['list'][0]['components']['pm2_5']?.toDouble() ?? 0;
+      return _calculateAqiFromPm2_5(pm2_5);
     }
-    return 0;
+    throw Exception('Failed to load AQI data');
+  }
+
+  int _calculateAqiFromPm2_5(double pm2_5) {
+    if (pm2_5 <= 12.0) return _linearInterpolation(pm2_5, 0, 50, 0, 12.0);
+    if (pm2_5 <= 35.4) return _linearInterpolation(pm2_5, 51, 100, 12.1, 35.4);
+    if (pm2_5 <= 55.4) return _linearInterpolation(pm2_5, 101, 150, 35.5, 55.4);
+    if (pm2_5 <= 150.4) return _linearInterpolation(pm2_5, 151, 200, 55.5, 150.4);
+    if (pm2_5 <= 250.4) return _linearInterpolation(pm2_5, 201, 300, 150.5, 250.4);
+    return _linearInterpolation(pm2_5, 301, 500, 250.5, 500.4);
+  }
+
+  int _linearInterpolation(double c, int aqiLow, int aqiHigh, double concLow, double concHigh) {
+    return (((aqiHigh - aqiLow) / (concHigh - concLow)) * (c - concLow) + aqiLow).round();
   }
 
   Marker _buildCityMarker(String name, double lat, double lon, int aqi) {
     final color = _getColorForAqi(aqi);
     final aqiDescription = _getAqiDescription(aqi);
+    final aqiText = aqi == -1 ? 'N/A' : aqi.toString();
 
     return Marker(
       width: 120.0,
@@ -81,14 +99,37 @@ class _FixedKathmanduAQIMapState extends State<FixedKathmanduAQIMap> {
           children: [
             Icon(Icons.location_on, color: color, size: 40),
             Container(
-              padding: const EdgeInsets.all(4),
+              padding: const EdgeInsets.symmetric(horizontal: 6, vertical: 2),
               decoration: BoxDecoration(
                 color: Colors.white,
-                borderRadius: BorderRadius.circular(8),
+                borderRadius: BorderRadius.circular(12),
+                boxShadow: [
+                  BoxShadow(
+                    color: Colors.black.withOpacity(0.1),
+                    blurRadius: 4,
+                    offset: const Offset(0, 2),
+                  ),
+                ],
               ),
-              child: Text(
-                name,
-                style: const TextStyle(fontSize: 12, fontWeight: FontWeight.bold),
+              child: Column(
+                mainAxisSize: MainAxisSize.min,
+                children: [
+                  Text(
+                    name,
+                    style: const TextStyle(
+                      fontSize: 12,
+                      fontWeight: FontWeight.bold,
+                    ),
+                  ),
+                  Text(
+                    'AQI: $aqiText',
+                    style: TextStyle(
+                      fontSize: 10,
+                      color: color,
+                      fontWeight: FontWeight.bold,
+                    ),
+                  ),
+                ],
               ),
             ),
           ],
@@ -104,46 +145,83 @@ class _FixedKathmanduAQIMapState extends State<FixedKathmanduAQIMap> {
         title: Text(name),
         content: Column(
           mainAxisSize: MainAxisSize.min,
+          crossAxisAlignment: CrossAxisAlignment.start,
           children: [
-            Text('AQI: $aqi', style: TextStyle(fontSize: 24, color: _getColorForAqi(aqi))),
-            Text('Air Quality: $desc'),
+            if (aqi == -1)
+              const Text('AQI data not available', style: TextStyle(fontSize: 18))
+            else ...[
+              Text(
+                'AQI: $aqi',
+                style: TextStyle(
+                  fontSize: 24,
+                  color: _getColorForAqi(aqi),
+                  fontWeight: FontWeight.bold,
+                ),
+              ),
+              const SizedBox(height: 8),
+              Text(
+                'Air Quality: $desc',
+                style: const TextStyle(fontSize: 16),
+              ),
+              const SizedBox(height: 8),
+              Text(
+                _getHealthImplications(aqi),
+                style: const TextStyle(fontSize: 14),
+              ),
+            ],
           ],
         ),
-        actions: [TextButton(onPressed: () => Navigator.pop(context), child: Text('OK'))],
+        actions: [
+          TextButton(
+            onPressed: () => Navigator.pop(context),
+            child: const Text('OK'),
+          ),
+        ],
       ),
     );
   }
 
   Color _getColorForAqi(int aqi) {
-    switch (aqi) {
-      case 1: return Colors.green;
-      case 2: return Colors.yellow;
-      case 3: return Colors.orange;
-      case 4: return Colors.red;
-      case 5: return Colors.purple;
-      default: return Colors.grey;
-    }
+    if (aqi == -1) return Colors.grey;
+    if (aqi <= 50) return Colors.green;
+    if (aqi <= 100) return Colors.yellow;
+    if (aqi <= 150) return Colors.orange;
+    if (aqi <= 200) return Colors.red;
+    if (aqi <= 300) return Colors.purple;
+    return Colors.brown;
   }
 
   String _getAqiDescription(int aqi) {
-    switch (aqi) {
-      case 1: return 'Good';
-      case 2: return 'Fair';
-      case 3: return 'Moderate';
-      case 4: return 'Poor';
-      case 5: return 'Very Poor';
-      default: return 'Unknown';
-    }
+    if (aqi == -1) return 'Data unavailable';
+    if (aqi <= 50) return 'Good';
+    if (aqi <= 100) return 'Moderate';
+    if (aqi <= 150) return 'Unhealthy for Sensitive Groups';
+    if (aqi <= 200) return 'Unhealthy';
+    if (aqi <= 300) return 'Very Unhealthy';
+    return 'Hazardous';
+  }
+
+  String _getHealthImplications(int aqi) {
+    if (aqi == -1) return '';
+    if (aqi <= 50) return 'Air quality is satisfactory with little health risk.';
+    if (aqi <= 100) return 'Acceptable quality, but some pollutants may affect sensitive individuals.';
+    if (aqi <= 150) return 'Sensitive groups may experience health effects.';
+    if (aqi <= 200) return 'Everyone may begin to experience health effects.';
+    if (aqi <= 300) return 'Health alert: everyone may experience more serious health effects.';
+    return 'Health warnings of emergency conditions.';
   }
 
   @override
   Widget build(BuildContext context) {
     return Scaffold(
       appBar: AppBar(
-        title: const Text("Kathmandu Valley AQI"),
+        title: const Text("Kathmandu Valley AQI Map"),
         centerTitle: true,
         actions: [
-          IconButton(onPressed: _loadAqiForAllCities, icon: const Icon(Icons.refresh))
+          IconButton(
+            icon: const Icon(Icons.refresh),
+            onPressed: _loadAqiForAllCities,
+          ),
         ],
       ),
       body: Stack(
@@ -157,12 +235,15 @@ class _FixedKathmanduAQIMapState extends State<FixedKathmanduAQIMap> {
               TileLayer(
                 urlTemplate: "https://{s}.tile.openstreetmap.org/{z}/{x}/{y}.png",
                 subdomains: const ['a', 'b', 'c'],
+                userAgentPackageName: 'com.example.air_zone',
               ),
               MarkerLayer(markers: _cityMarkers),
             ],
           ),
           if (_isLoading)
-            const Center(child: CircularProgressIndicator()),
+            const Center(
+              child: CircularProgressIndicator(),
+            ),
         ],
       ),
     );
